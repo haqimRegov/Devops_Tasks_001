@@ -4,7 +4,7 @@ Description: The CloudFormation template for the CodePipeline.
 Parameters:
   Stage:
     Type: String
-    Default: dev
+    Default: QA
   GithubUserName:
     Type: String
     Default: <USERNAME>
