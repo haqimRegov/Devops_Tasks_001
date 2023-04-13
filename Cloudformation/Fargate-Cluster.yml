@@ -1,0 +1,299 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: The CloudFormation template for the Fargate ECS Cluster.
+
+Parameters:
+  Stage:
+    Type: String
+  ContainerPort:
+    Type: Number
+  ImageURI:
+    Type: String
+
+Resources:
+
+  # Create ECS Cluster
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Join ['-', [!Ref Stage, 'Haqim', 'Cluster']]
+
+  # Create VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: True
+      EnableDnsSupport: True
+
+  # Subnet A (Public)
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.1.0/24
+      VpcId: !Ref VPC
+      AvailabilityZone: !Join ['', [!Ref "AWS::Region", 'a']]
+
+  # Subnet B (Public)
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.2.0/24
+      VpcId: !Ref VPC
+      AvailabilityZone: !Join ['', [!Ref "AWS::Region", 'b']]
+
+  # Public route table to allow internet access 
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  # Route traffic to iGW
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCInternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  #Private subnetting 
+  #Private subnet A
+  PrivSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.3.0/24
+      VpcId: !Ref VPC
+      AvailabilityZone: !Join ['', [!Ref "AWS::Region", 'a']]
+
+  #Private subnet B
+  PrivSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.0.4.0/24
+      VpcId: !Ref VPC
+      AvailabilityZone: !Join ['', [!Ref "AWS::Region", 'b']]
+
+  #Private route table 
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  
+  #Route NatGateway
+  NATGateway:
+    DependsOn: NATGatewayEIP
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref SubnetA
+      Tags:
+        - Key: Name
+          Value: NatGateway
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+        Domain: vpc
+
+  #Private Route 
+  RouteNATGateway:
+    DependsOn: NATGateway
+    Type: AWS::EC2::Route
+    Properties:
+        RouteTableId: !Ref PrivateRouteTable
+        DestinationCidrBlock: '0.0.0.0/0'
+        NatGatewayId: !Ref NATGateway
+
+
+  # Attach Public Route to SubnetA
+  SubnetAPublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref SubnetA
+
+  # Attach Public Route to SubnetB
+  SubnetBPublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref SubnetB
+
+  # Attach Private Route to PrivSubnetA
+  SubnetAPrivateRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivSubnetA
+
+  # Attach Private Route to PrivSubnetB
+  SubnetBPrivateRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivSubnetB
+
+
+  # IGW
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  #Attaching IGW to VPC
+  VPCInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: 
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  # excecution role for ecs
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', [!Ref Stage, 'Haqim', 'ExecutionRole']]
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  # Task definition with container properties
+  #Network mode set to awsvpc as we are using fargate 
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      Memory: 1024
+      Cpu: 512
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - 'FARGATE'
+      TaskRoleArn: !Ref ExecutionRole
+      ExecutionRoleArn: !Ref ExecutionRole
+      ContainerDefinitions:
+        - Name: !Join ['-', [!Ref Stage, 'Haqim', 'Container']]
+          Image: !Ref ImageURI
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !Ref ContainerPort
+
+  # LB security group 
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref Stage, 'Haqim', 'LoadBalancerSecurityGroup']]
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Security group for container and attach ALB Security group to allow traffic  
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['-', [!Ref Stage, 'Haqim', 'ContainerSecurityGroup']]
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+# Spinup Application Load balancer and attach to Subnets 
+#Application load balancer not working 
+  # LoadBalancer:
+  #   Type: AWS::ElasticLoadBalancingV2::ApplicationLoadBalancer
+  #   Properties: 
+  #     IpAddressType: ipv4
+  #     Name: !Join ['-', [!Ref Stage, 'Haqim', 'LoadBalancer']]
+  #     Scheme: internet-facing
+  #     SecurityGroups:
+  #       - !Ref LoadBalancerSecurityGroup
+  #     Subnets: 
+  #       - !Ref SubnetA
+  #       - !Ref SubnetB
+
+  # # Configure target group for ALB
+  # TargetGroup:
+  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  #   Properties:
+  #     Name: !Join ['-', [!Ref Stage, 'Haqim', 'TargetGroup']]
+  #     Port: 80
+  #     Protocol: HTTP
+  #     TargetType: ip
+  #     VpcId: !Ref VPC
+
+  # # Create an ALB Listener and attach the TargetGroup and LoadBalancer
+  # LoadBalancerListener:
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   Properties:
+  #     DefaultActions: 
+  #       - TargetGroupArn: !Ref TargetGroup
+  #         Type: forward
+  #     LoadBalancerArn: !Ref LoadBalancer
+  #     Port: 80
+  #     Protocol: HTTP
+
+  #try elastic load balancer 
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: 
+      IpAddressType: ipv4
+      Name: !Join ['-', [!Ref Stage, !Ref 'AWS::AccountId', 'LoadBalancer']]
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets: 
+        - !Ref SubnetA
+        - !Ref SubnetB
+      Type: application
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', [!Ref Stage, !Ref 'AWS::AccountId', 'TargetGroup']]
+      Port: 80
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPC
+
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions: 
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+
+  # Create an ECS Service and add created Cluster, TaskDefintion, Subnets, TargetGroup and SecurityGroup
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: LoadBalancerListener
+    Properties:
+      ServiceName: !Join ['-', [!Ref Stage, 'Haqim', 'ECSService']]
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref SubnetA
+            - !Ref SubnetB
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Join ['-', [!Ref Stage, 'Haqim', 'Container']]
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+
+          #test push 
+
